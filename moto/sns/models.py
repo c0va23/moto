@@ -85,6 +85,7 @@ class Topic(CloudFormationModel):
         message_attributes: Optional[Dict[str, Any]] = None,
         group_id: Optional[str] = None,
         deduplication_id: Optional[str] = None,
+        message_structure: Optional[str] = None,
     ) -> str:
         message_id = str(mock_random.uuid4())
         subscriptions, _ = self.sns_backend.list_subscriptions_by_topic(
@@ -98,7 +99,9 @@ class Topic(CloudFormationModel):
                 message_attributes=message_attributes,
                 group_id=group_id,
                 deduplication_id=deduplication_id,
+                message_structure=message_structure,
             )
+
         self.sent_notifications.append(
             (message_id, message, subject, message_attributes, group_id)
         )
@@ -222,14 +225,22 @@ class Subscription(BaseModel):
         message_attributes: Optional[Dict[str, Any]] = None,
         group_id: Optional[str] = None,
         deduplication_id: Optional[str] = None,
+        message_structure: Optional[str] = None,
     ) -> None:
         if self._filter_policy_matcher is not None:
             if not self._filter_policy_matcher.matches(message_attributes, message):
                 return
 
+        if message_structure == "json":
+            structured_message = json.loads(message)
+            message = (
+                structured_message.get(self.protocol) or structured_message["default"]
+            )
+
         if self.protocol == "sqs":
             queue_name = self.endpoint.split(":")[-1]
             region = self.endpoint.split(":")[3]
+
             if self.attributes.get("RawMessageDelivery") != "true":
                 sqs_backends[self.account_id][region].send_message(
                     queue_name,
@@ -657,6 +668,7 @@ class SNSBackend(BaseBackend):
         message_attributes: Optional[Dict[str, Any]] = None,
         group_id: Optional[str] = None,
         deduplication_id: Optional[str] = None,
+        message_structure: Optional[str] = None,
     ) -> str:
         if subject is not None and len(subject) > 100:
             # Note that the AWS docs around length are wrong: https://github.com/getmoto/moto/issues/1503
@@ -675,6 +687,9 @@ class SNSBackend(BaseBackend):
             raise InvalidParameterValue(
                 "An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: Message too long"
             )
+
+        if message_structure is not None and message_structure != "json":
+            raise ValueError("MessageStructure must be 'json' if provided")
 
         try:
             topic = self.get_topic(arn)  # type: ignore
@@ -703,6 +718,7 @@ class SNSBackend(BaseBackend):
                 message_attributes=message_attributes,
                 group_id=group_id,
                 deduplication_id=deduplication_id,
+                message_structure=message_structure,
             )
         except SNSNotFoundError:
             endpoint = self.get_endpoint(arn)  # type: ignore
@@ -1139,6 +1155,7 @@ class SNSBackend(BaseBackend):
                     message_attributes=entry.get("MessageAttributes", {}),
                     group_id=entry.get("MessageGroupId"),
                     deduplication_id=entry.get("MessageDeduplicationId"),
+                    message_structure=entry.get(" MessageStructure "),
                 )
                 successful.append({"MessageId": message_id, "Id": entry["Id"]})
             except Exception as e:
